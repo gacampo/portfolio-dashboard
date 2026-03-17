@@ -525,46 +525,63 @@ function addRow() {
   setTimeout(()=>{ const rows=document.querySelectorAll('#tableBody tr'); if(rows.length) rows[rows.length-1].scrollIntoView({behavior:'smooth',block:'nearest'}); },100);
 }
 
-// ── PRICE REFRESH via Stooq.com ─────────────────────────────────────────────
-function toStooqTicker(tk) {
+// ── PRICE REFRESH ────────────────────────────────────────────────────────────
+function toYahooTicker(tk) {
   if (!tk) return null;
-  // Skip bonds, funds, and ambiguous tickers
   var skip = ['GD35','GD30','GD38','GD41','AL30','AL35','Pabrai'];
   if (skip.indexOf(tk) > -1) return null;
-
   if (tk.indexOf(':') === -1) {
-    // No exchange prefix - skip local AR stocks without exchange
-    var skipLocal = ['SEG','TGS','LOMA','TAVHL','EDELWEISS','MIRG','CEPU','AUSO','ECOG'];
+    var skipLocal = ['SEG','TGS','LOMA','TAVHL','EDELWEISS'];
     if (skipLocal.indexOf(tk) > -1) return null;
-    return tk.toLowerCase() + '.us';
+    return tk;
   }
   var parts = tk.split(':');
-  var exch = parts[0], sym = parts[1].toLowerCase();
+  var exch = parts[0], sym = parts[1];
   var map = {
-    'NYSE':   sym + '.us',
-    'NASDAQ': sym + '.us',
-    'BCBA':   sym + '.ba',
-    'LON':    sym + '.uk',
-    'EPA':    sym + '.fr',
-    'LSE':    sym + '.uk',
-    'TSX':    sym + '.ca',
-    'ASX':    sym + '.au'
+    'NYSE':   sym,
+    'NASDAQ': sym,
+    'BCBA':   sym + '.BA',
+    'LON':    sym + '.L',
+    'EPA':    sym + '.PA',
+    'LSE':    sym + '.L',
+    'TSX':    sym + '.TO'
   };
   return map[exch] || null;
 }
 
-async function fetchStooqPrice(stooqTk) {
-  var url = 'https://stooq.com/q/l/?s=' + encodeURIComponent(stooqTk) + '&f=sd2c&e=csv';
-  var resp = await fetch(url, {signal: AbortSignal.timeout(8000)});
-  var text = await resp.text();
-  // CSV format: Symbol,Date,Close
-  // First line is header, second is data
-  var lines = text.trim().split('\n');
-  if (lines.length < 2) return null;
-  var parts = lines[1].split(',');
-  if (parts.length < 3) return null;
-  var price = parseFloat(parts[2]);
-  return (isNaN(price) || price <= 0) ? null : price;
+async function fetchPrice(yahooTk) {
+  // Yahoo Finance v8 - works from HTTPS origins
+  var url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(yahooTk) + '?interval=1d&range=1d&corsDomain=finance.yahoo.com';
+  try {
+    var resp = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'application/json'
+      },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var json = await resp.json();
+    var meta = json.chart.result[0].meta;
+    var price = meta.regularMarketPrice || meta.previousClose;
+    console.log('[price] ' + yahooTk + ' = ' + price);
+    return price > 0 ? price : null;
+  } catch(e) {
+    // Fallback: try v7 quote endpoint
+    try {
+      var url2 = 'https://query2.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(yahooTk);
+      var resp2 = await fetch(url2, {signal: AbortSignal.timeout(10000)});
+      if (!resp2.ok) throw new Error('HTTP ' + resp2.status);
+      var json2 = await resp2.json();
+      var q = json2.quoteResponse.result[0];
+      var price2 = q.regularMarketPrice || q.previousClose;
+      console.log('[price fallback] ' + yahooTk + ' = ' + price2);
+      return price2 > 0 ? price2 : null;
+    } catch(e2) {
+      console.warn('[price error] ' + yahooTk + ':', e2.message);
+      return null;
+    }
+  }
 }
 
 async function refreshPrices() {
@@ -572,58 +589,41 @@ async function refreshPrices() {
   var icon = document.getElementById('refreshIcon');
   var status = document.getElementById('priceStatus');
   btn.disabled = true;
-  icon.textContent = '⟳';
   icon.className = 'spin';
   status.style.color = '';
 
-  // Build jobs list
   var jobs = [];
   data.forEach(function(r) {
     if (r.tipo === 'Bono' || r.tipo === 'Fondo') return;
-    var stk = toStooqTicker(r.tk);
-    if (stk) jobs.push({id: r.id, stk: stk, tk: r.tk});
+    var ytk = toYahooTicker(r.tk);
+    if (ytk) jobs.push({id: r.id, ytk: ytk});
   });
 
+  console.log('[refreshPrices] fetching ' + jobs.length + ' tickers...');
   status.textContent = '0 / ' + jobs.length;
-  var updated = 0, errors = 0, skipped = 0;
+  var updated = 0, errors = 0;
 
-  // Fetch sequentially with small delay to be respectful to stooq
   for (var i = 0; i < jobs.length; i++) {
     var job = jobs[i];
-    try {
-      var price = await fetchStooqPrice(job.stk);
-      if (price && price > 0) {
-        var r = data.find(function(x){return x.id===job.id;});
-        if (r) { r.px = Math.round(price * 100) / 100; updated++; }
-      } else {
-        skipped++;
-      }
-    } catch(e) {
+    var price = await fetchPrice(job.ytk);
+    if (price) {
+      var r = data.find(function(x){return x.id===job.id;});
+      if (r) { r.px = Math.round(price * 100) / 100; updated++; }
+    } else {
       errors++;
     }
     status.textContent = (i+1) + ' / ' + jobs.length;
-    // Small delay between requests
-    if (i < jobs.length - 1) await new Promise(function(res){setTimeout(res, 150);});
+    if (i < jobs.length - 1) await new Promise(function(res){setTimeout(res, 200);});
   }
 
-  // Save and re-render
-  if (updated > 0) {
-    markDirty(); saveToLocal(); filterTable();
-  }
+  if (updated > 0) { markDirty(); saveToLocal(); filterTable(); }
 
   icon.className = '';
-  icon.textContent = '✓';
-  var parts2 = [];
-  if (updated > 0) parts2.push(updated + ' actualizados');
-  if (errors > 0) parts2.push(errors + ' errores');
-  if (skipped > 0) parts2.push(skipped + ' sin datos');
-  status.textContent = parts2.join(', ');
-  if (errors > 0 && updated === 0) status.style.color = '#f87171';
+  icon.textContent = '\u21BB';
+  status.textContent = updated + ' actualizados' + (errors > 0 ? ', ' + errors + ' sin datos' : '');
+  if (updated === 0) status.style.color = '#f87171';
   btn.disabled = false;
-
-  setTimeout(function() {
-    icon.textContent = '\u21BB'; status.textContent = '';
-  }, 6000);
+  setTimeout(function(){status.textContent='';}, 8000);
 }
 
 function filterTable() {
