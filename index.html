@@ -525,7 +525,7 @@ function addRow() {
   setTimeout(()=>{ const rows=document.querySelectorAll('#tableBody tr'); if(rows.length) rows[rows.length-1].scrollIntoView({behavior:'smooth',block:'nearest'}); },100);
 }
 
-// ── PRICE REFRESH ────────────────────────────────────────────────────────────
+// ── PRICE REFRESH via Cloudflare Worker proxy ────────────────────────────────
 function toYahooTicker(tk) {
   if (!tk) return null;
   var skip = ['GD35','GD30','GD38','GD41','AL30','AL35','Pabrai'];
@@ -549,38 +549,21 @@ function toYahooTicker(tk) {
   return map[exch] || null;
 }
 
+// ── Change this URL if you deploy your own Cloudflare Worker ─────────────────
+var PRICE_PROXY = 'https://shiny-hall-88edyf-proxy.gacampo.workers.dev';
+
 async function fetchPrice(yahooTk) {
-  // Yahoo Finance v8 - works from HTTPS origins
-  var url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(yahooTk) + '?interval=1d&range=1d&corsDomain=finance.yahoo.com';
+  var url = PRICE_PROXY + '?symbol=' + encodeURIComponent(yahooTk);
   try {
-    var resp = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json'
-      },
-      signal: AbortSignal.timeout(10000)
-    });
+    var resp = await fetch(url, {signal: AbortSignal.timeout(10000)});
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     var json = await resp.json();
-    var meta = json.chart.result[0].meta;
-    var price = meta.regularMarketPrice || meta.previousClose;
-    console.log('[price] ' + yahooTk + ' = ' + price);
-    return price > 0 ? price : null;
+    if (json.error) throw new Error(json.error);
+    console.log('[price] ' + yahooTk + ' = ' + json.price);
+    return json.price > 0 ? json.price : null;
   } catch(e) {
-    // Fallback: try v7 quote endpoint
-    try {
-      var url2 = 'https://query2.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(yahooTk);
-      var resp2 = await fetch(url2, {signal: AbortSignal.timeout(10000)});
-      if (!resp2.ok) throw new Error('HTTP ' + resp2.status);
-      var json2 = await resp2.json();
-      var q = json2.quoteResponse.result[0];
-      var price2 = q.regularMarketPrice || q.previousClose;
-      console.log('[price fallback] ' + yahooTk + ' = ' + price2);
-      return price2 > 0 ? price2 : null;
-    } catch(e2) {
-      console.warn('[price error] ' + yahooTk + ':', e2.message);
-      return null;
-    }
+    console.warn('[price error] ' + yahooTk + ':', e.message);
+    return null;
   }
 }
 
@@ -599,7 +582,7 @@ async function refreshPrices() {
     if (ytk) jobs.push({id: r.id, ytk: ytk});
   });
 
-  console.log('[refreshPrices] fetching ' + jobs.length + ' tickers...');
+  console.log('[refreshPrices] fetching ' + jobs.length + ' tickers via proxy...');
   status.textContent = '0 / ' + jobs.length;
   var updated = 0, errors = 0;
 
@@ -609,11 +592,9 @@ async function refreshPrices() {
     if (price) {
       var r = data.find(function(x){return x.id===job.id;});
       if (r) { r.px = Math.round(price * 100) / 100; updated++; }
-    } else {
-      errors++;
-    }
+    } else { errors++; }
     status.textContent = (i+1) + ' / ' + jobs.length;
-    if (i < jobs.length - 1) await new Promise(function(res){setTimeout(res, 200);});
+    if (i < jobs.length - 1) await new Promise(function(res){setTimeout(res, 100);});
   }
 
   if (updated > 0) { markDirty(); saveToLocal(); filterTable(); }
